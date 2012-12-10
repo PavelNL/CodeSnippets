@@ -1,0 +1,277 @@
+//
+// Measure AA battery voltage very efficiently - periodically with a DEEP sleep
+//
+// Platform - JN6 + Ardude 1.0.2 Mac
+// Libs: RF12mods as of 27 Nov 2012
+//
+// Original from: http://jeelabs.net/projects/cafe/wiki/POF_03_-_Wireless_light_sensor
+// by JCW 2012
+//
+// Additionally 
+//  ** the "Measuring VCC via the bandgap" from: http://jeelabs.org/2012/05/04/measuring-vcc-via-the-bandgap/
+//     https://github.com/jcw/jeelib/blob/master/examples/Ports/bandgap/bandgap.ino
+//  ** adjust millis from http://arduino.cc/forum/index.php/topic,42743.0.html 
+//
+// JL forum discussions:
+//   - http://forum.jeelabs.net/node/1565
+//   - http://forum.jeelabs.net/node/1568
+//
+// Expected hardware:
+//    JeeNode v6
+//    AA board with a single battery
+//    Resistor from (+) pin of battery to JN port2 Analog Input (A1)
+//
+  
+#define DEBUG 1 // to activate Serial output
+//#define JNWATCHDOG 1 // if not defined => use RF12 watchdog
+//#define DEBUGPOWER 1 // to make awake time = 4s enough to measure current with DVM
+
+#include <JeeLib.h>
+#include <avr/sleep.h>
+#include <util/atomic.h>
+
+volatile bool adcDone;
+
+ISR(WDT_vect) { Sleepy::watchdogEvent(); }
+
+ISR(ADC_vect) { adcDone = true; }
+
+MilliTimer readoutTimer;
+byte runningAvg;
+byte radioIsOn;
+
+// to indicate the active mode
+#define LED 9 // pin 9 on JN6, pin 13 on Uno
+#define LEDON  LOW // special for JN
+#define LEDOFF HIGH // special for JN
+
+#define BATTP A1 // PC1 == Port 2 JN 
+
+#define SERIAL_BAUD 115200
+
+#define SEND_INTERVAL_SEC 10 // send every 1 sec via poll() 
+#define SLEEP_CORRECTION_MS 6 // negative correction to millis == loop duration
+
+#define VCC_READ_DELAY 10 // internal delay in vccRead() as count
+
+/////////////////////////////
+static byte vccRead (byte count =4) {
+
+  // Adust this value to your boards specific internal BG voltage x1000
+  const long InternalReferenceVoltage = 1150L;  
+
+  set_sleep_mode(SLEEP_MODE_ADC);
+
+  ADMUX = bit(REFS0) | 14; // use VCC and internal bandgap
+  bitSet(ADCSRA, ADIE);
+
+  while (count-- > 0) {
+    adcDone = false;
+    while (!adcDone)
+      sleep_mode();
+  }
+  
+  while( ( (ADCSRA & (1<<ADSC)) != 0 ) );
+  
+  bitClear(ADCSRA, ADIE);
+
+/*
+// from http://arduino.cc/forum/index.php/topic,38119.msg282519.html#msg282519
+#if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
+     // For mega boards
+     const long InternalReferenceVoltage = 1115L;  // Adust this value to your boards specific internal BG voltage x1000
+        // REFS1 REFS0          --> 0 1, AVcc internal ref.
+        // MUX4 MUX3 MUX2 MUX1 MUX0  --> 11110 1.1V (VBG)
+     ADMUX = (0<<REFS1) | (1<<REFS0) | (0<<ADLAR) | (1<<MUX4) | (1<<MUX3) | (1<<MUX2) | (1<<MUX1) | (0<<MUX0); 
+#else
+     // For 168/328 boards
+     const long InternalReferenceVoltage = 1050L;  // Adust this value to your boards specific internal BG voltage x1000
+        // REFS1 REFS0          --> 0 1, AVcc internal ref.
+        // MUX3 MUX2 MUX1 MUX0  --> 1110 1.1V (VBG)
+     ADMUX = (0<<REFS1) | (1<<REFS0) | (0<<ADLAR) | (1<<MUX3) | (1<<MUX2) | (1<<MUX1) | (0<<MUX0);      
+#endif
+
+  // Start a conversion  
+  ADCSRA |= _BV( ADSC );
+  // Wait for it to complete
+  while( ( (ADCSRA & (1<<ADSC)) != 0 ) );
+*/
+
+  unsigned int adcCnt = ADC;
+
+#ifdef DEBUG9
+    Serial.print("ADC=");
+    Serial.println(adcCnt);
+    Serial.print("in 20mV units starting at 1V =");
+    Serial.println( (((InternalReferenceVoltage/20U) * 1023U)/(adcCnt + 1)) - 50 );
+    Serial.print("in 10mV units=");
+    Serial.println( ( ((InternalReferenceVoltage * 1023U)/adcCnt) + 5L) / 10L );
+    Serial.flush();
+#endif
+  
+  // convert ADC readings to fit in one byte, i.e. 20 mV steps:
+  // 1.0V = 0, 1.8V = 40, 3.3V = 115, 5.0V = 200, 6.0V = 250
+  return ((InternalReferenceVoltage/20U) * 1023U) / (adcCnt + 1) - 50;
+  
+} // vccRead
+
+
+// full procedure including reading VCC for calibration
+byte battRead(){
+  
+        // take 3x readings of VCC and calculate an average value
+        byte x1 = vccRead(VCC_READ_DELAY);
+        byte x2 = vccRead(VCC_READ_DELAY);
+        byte x3 = vccRead(VCC_READ_DELAY);
+        byte vccValue = (x1+x2+x3) / 3;
+
+#ifdef DEBUG3
+    Serial.print("Average VCC byte = ");
+    Serial.println(vccValue);
+    Serial.flush();
+#endif        
+
+       // read AA battery voltage: 0..1023 == 0..VCC
+       word y1 = analogRead(BATTP); 
+       word y2 = analogRead(BATTP);  
+       word y3 = analogRead(BATTP);  
+       unsigned long VCCmV = (vccValue * 20U) + 1000L;
+       // convert to relative number of 10mv - 0..2V == 0..200 
+       unsigned long batLong = ( ((y1+y2+y3)/3)*VCCmV ) / 10240L ;
+       byte aaBatValue = 0;
+       if ( batLong > 200 ) {
+          aaBatValue = 0;
+
+#ifdef DEBUG
+    Serial.print("ERROR: Average BATT Long > 200 = ");
+    Serial.println(batLong);
+    Serial.flush();
+#endif        
+       }
+       else {
+         aaBatValue = (byte) batLong ;
+
+#ifdef DEBUG
+    Serial.print("Average BATT byte = ");
+    Serial.println(aaBatValue);
+    Serial.flush();
+#endif        
+
+       } // batLong is fine
+
+return aaBatValue;
+
+} // battRead
+
+
+/////////////////////////////
+void setup () {
+
+    byte x99 = 0;
+
+    // initialize the digital pin as an output.
+    pinMode(LED, OUTPUT);  
+    digitalWrite(LED, LEDON); // LED on 
+
+  // initialize the serial port
+#ifdef DEBUG
+    Serial.begin(SERIAL_BAUD);
+    Serial.println("\n[Measure_Voltage]");
+    Serial.flush();
+#endif
+
+    rf12_initialize(1, RF12_868MHZ);
+    // see http://tools.jeelabs.org/rfm12b
+    //rf12_control(0xC040); // set low-battery level to 2.2V i.s.o. 3.1V
+   
+    // start with the radio on
+    radioIsOn = 1;
+
+#ifdef DEBUG
+    for(byte i=0;i<40;i+=4){  
+      x99 = vccRead(i);
+      //Sleepy::loseSomeTime(16);
+      Serial.print("Vcc(");
+      Serial.print( i );
+      Serial.print(") in mV: ");
+      Serial.println( (unsigned long) (x99 * 20) + 1000L );
+      Serial.flush();
+      //Sleepy::loseSomeTime(1000);
+    } // loop i
+
+    byte battTest = battRead();
+    Serial.print("BATT = ");
+    Serial.print( battTest * 10L );
+    Serial.println(" in mV");
+    Serial.flush();
+#endif
+
+#ifdef DEBUG
+    Serial.println("Setup is finished.");
+    Serial.flush();
+#endif
+
+    digitalWrite(LED, LEDOFF); // init finished
+
+} // setup
+
+
+/////////////////////////////
+void loop () {
+
+#ifdef DEBUG
+    Serial.print("..Starting millis=");
+    Serial.println(millis());
+    Serial.flush();
+#endif
+    
+    // get precise battery readings
+    byte aaBatValue = battRead();
+        
+    rf12_sendStart(0, &aaBatValue, sizeof aaBatValue);
+    // set the sync mode to 2 if the fuses are still the Arduino default
+    // mode 3 (full powerdown) can only be used with 258 CK startup fuses
+    rf12_sendWait(2);
+
+#ifdef DEBUGPOWER
+    delay(4000); // stay ON to measure consumption
+#endif
+    
+    // turn OFF before sleep
+    digitalWrite(LED, LEDOFF); 
+    
+#ifdef JNWATCHDOG
+    // sleep mode via JN watchdog
+    rf12_sleep(RF12_SLEEP);
+    Sleepy::loseSomeTime(SEND_INTERVAL_SEC * 1000L - SLEEP_CORRECTION_MS );
+    rf12_sleep(RF12_WAKEUP);
+#else
+
+    // set timer to sleep
+    // from http://forum.jeelabs.net/node/1559
+    rf12_setWatchdog(SEND_INTERVAL_SEC * 1000L - SLEEP_CORRECTION_MS); 
+    rf12_sleep(0); // power off RFM module (watchdog still works) 
+    byte adcsraSave = ADCSRA; ADCSRA &= ~ bit(ADEN); // disable the ADC 
+    // deep sleep ATmega     
+    set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+    sleep_enable(); 
+     
+    // sleep until watchdog fired 
+    while (! rf12_watchdogFired()) 
+       sleep_cpu(); 
+    
+    sleep_disable(); // re-enable what we disabled 
+    ADCSRA = adcsraSave; 
+    rf12_sleep(-1);
+    
+    // adjust millis
+    // from http://arduino.cc/forum/index.php/topic,42743.0.html
+    extern volatile unsigned long timer0_millis;
+    timer0_millis = timer0_millis + (SEND_INTERVAL_SEC * 1000L) ;
+
+#endif
+
+    // turn ON when wake up
+    digitalWrite(LED, LEDON); 
+
+} // loop
