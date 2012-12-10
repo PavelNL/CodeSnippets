@@ -38,7 +38,6 @@ ISR(ADC_vect) { adcDone = true; }
 
 MilliTimer readoutTimer;
 byte runningAvg;
-byte radioIsOn;
 
 // to indicate the active mode
 #define LED 9 // pin 9 on JN6, pin 13 on Uno
@@ -184,8 +183,6 @@ void setup () {
     // see http://tools.jeelabs.org/rfm12b
     //rf12_control(0xC040); // set low-battery level to 2.2V i.s.o. 3.1V
    
-    // start with the radio on
-    radioIsOn = 1;
 
 #ifdef DEBUG
     for(byte i=0;i<40;i+=4){  
@@ -228,10 +225,6 @@ void loop () {
     // get precise battery readings
     byte aaBatValue = battRead();
         
-    rf12_sendStart(0, &aaBatValue, sizeof aaBatValue);
-    // set the sync mode to 2 if the fuses are still the Arduino default
-    // mode 3 (full powerdown) can only be used with 258 CK startup fuses
-    rf12_sendWait(2);
 
 #ifdef DEBUGPOWER
     delay(4000); // stay ON to measure consumption
