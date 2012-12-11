@@ -57,7 +57,7 @@ byte runningAvg;
 static byte vccRead (byte count =4) {
 
   // Adust this value to your boards specific internal BG voltage x1000
-  const long InternalReferenceVoltage = 1150L;  
+  const long InternalReferenceVoltage = 1140L;  
 
   set_sleep_mode(SLEEP_MODE_ADC);
 
