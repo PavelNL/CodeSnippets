@@ -122,7 +122,8 @@ byte battRead(){
         byte x1 = vccRead(VCC_READ_DELAY);
         byte x2 = vccRead(VCC_READ_DELAY);
         byte x3 = vccRead(VCC_READ_DELAY);
-        byte vccValue = (x1+x2+x3) / 3;
+        word xsum = x1 + x2 + x3 ;
+        byte vccValue = ( xsum / 3 ) ;
 
 #ifdef DEBUG3
     Serial.print("Average VCC byte = ");
